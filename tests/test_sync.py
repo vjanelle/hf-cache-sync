@@ -128,12 +128,12 @@ class CacheScenarios(unittest.TestCase):
                  ({'XDG_CACHE_HOME': '/xdg'}, '/xdg/huggingface/hub')]
         for env, expected in cases:
             with self.subTest(env=env), patch.dict('os.environ', env, clear=True):
-                self.assertEqual(str(local_cache()), expected)
+                self.assertEqual(local_cache(), Path(expected))
 
     def test_given_no_remote_setting_when_invoked_then_it_reports_error(self):
         from unittest.mock import patch
         from hf_cache_sync.__main__ import main
-        with patch.dict('os.environ', {}, clear=True):
+        with patch.dict('os.environ', {'HF_HOME': str(self.root)}, clear=True):
             with self.assertRaises(SystemExit): main(['prune', '--model', 'org/model'])
 
     def test_given_large_transfer_when_verbose_then_progress_and_paths_are_reported(self):
@@ -145,7 +145,7 @@ class CacheScenarios(unittest.TestCase):
         output = StringIO()
         with redirect_stderr(output):
             self.assertEqual(main(['push', '--local', str(self.src), '--remote', str(self.dst), '--all', '--verbose']), 0)
-        self.assertIn('blobs/hash', output.getvalue())
+        self.assertIn(str(Path('blobs') / 'hash'), output.getvalue())
         self.assertIn('100%', output.getvalue())
         self.assertIn('MiB/s', output.getvalue())
 
@@ -216,7 +216,7 @@ class CacheScenarios(unittest.TestCase):
         dest = self.model(self.dst)
         (dest/'blobs/hash').write_text('bad')
         changes = core.sync(self.src, self.dst, ['org/model'], dry_run=True, repair=True)
-        self.assertIn('models--org--model/blobs/hash', changes)
+        self.assertIn(str(Path('models--org--model') / 'blobs' / 'hash'), changes)
         self.assertEqual((dest/'blobs/hash').read_text(), 'bad')
 
     def test_given_cli_repair_when_remote_is_source_then_local_is_repaired(self):

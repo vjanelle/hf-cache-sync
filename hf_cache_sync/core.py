@@ -87,7 +87,7 @@ def sync(source, destination, models=None, source_wins=False, dry_run=False, pro
                     continue
                 add(Path(base)/f)
     # Shared-store marker enables the upstream client to recognize its store.
-    if any(str(p).startswith('blobs/') for p in entries):
+    if any(p.parts[0] == 'blobs' for p in entries):
         blob_root = source / 'blobs'
         for marker in blob_root.iterdir():
             if marker.is_file() and not marker.is_symlink() and not marker.name.endswith('.refs'):
@@ -101,7 +101,7 @@ def sync(source, destination, models=None, source_wins=False, dry_run=False, pro
             same_file = (kind == 'file' and not dst.is_symlink() and dst.is_file() and
                          (value.stat().st_size == dst.stat().st_size if is_data and not repair
                           else filecmp.cmp(value, dst, shallow=False)))
-            same = (kind == 'link' and dst.is_symlink() and os.readlink(dst) == value) or same_file
+            same = (kind == 'link' and dst.is_symlink() and os.path.normpath(os.readlink(dst)) == os.path.normpath(value)) or same_file
             if same:
                 continue
             is_ref = len(rel.parts) >= 3 and rel.parts[1] == 'refs'
@@ -120,7 +120,7 @@ def sync(source, destination, models=None, source_wins=False, dry_run=False, pro
             try:
                 if kind == 'link':
                     os.unlink(tmp)
-                    os.symlink(value, tmp)
+                    os.symlink(os.path.normpath(value), tmp)
                 else:
                     total = value.stat().st_size
                     copied = 0
