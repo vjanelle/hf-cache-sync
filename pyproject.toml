@@ -1,0 +1,9 @@
+[project]
+name = "hf-cache-sync"
+version = "0.1.0"
+description = "Synchronize Hugging Face model caches"
+requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+dev = ["coverage>=7.6,<8", "pyinstaller>=6.11,<7"]
