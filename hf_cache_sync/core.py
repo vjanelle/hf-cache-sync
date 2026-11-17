@@ -1,4 +1,5 @@
 """Plan and apply conservative cache transfers."""
+import errno
 import filecmp
 import os
 from pathlib import Path
@@ -37,7 +38,18 @@ def safe_path(root, relative):
     return path
 
 
-def sync(source, destination, models=None, source_wins=False, dry_run=False):
+def cache_advice(fd, offset, length, advice):
+    """Best-effort hint; filesystems and platforms may not support it."""
+    hint = getattr(os, advice, None)
+    advise = getattr(os, 'posix_fadvise', None)
+    if hint is not None and advise is not None:
+        try:
+            advise(fd, offset, length, hint)
+        except OSError:
+            pass
+
+
+def sync(source, destination, models=None, source_wins=False, dry_run=False, progress=None, repair=False):
     source, destination = Path(source).resolve(), Path(destination).resolve()
     if source == destination or source in destination.parents or destination in source.parents:
         raise SyncError('Cache directories must be distinct and non-overlapping')
@@ -84,15 +96,23 @@ def sync(source, destination, models=None, source_wins=False, dry_run=False):
     for rel, (kind, value) in sorted(entries.items(), key=lambda item: (item[1][0] == 'link', str(item[0]))):
         dst = safe_path(destination, rel)
         if dst.is_symlink() or dst.exists():
-            same = (kind == 'link' and dst.is_symlink() and os.readlink(dst) == value) or (kind == 'file' and not dst.is_symlink() and dst.is_file() and filecmp.cmp(value, dst, shallow=False))
+            is_data = (rel.parts[0] == 'blobs' or
+                       (len(rel.parts) >= 2 and rel.parts[1] in ('blobs', 'snapshots')))
+            same_file = (kind == 'file' and not dst.is_symlink() and dst.is_file() and
+                         (value.stat().st_size == dst.stat().st_size if is_data and not repair
+                          else filecmp.cmp(value, dst, shallow=False)))
+            same = (kind == 'link' and dst.is_symlink() and os.readlink(dst) == value) or same_file
             if same:
                 continue
             is_ref = len(rel.parts) >= 3 and rel.parts[1] == 'refs'
-            if not (is_ref and source_wins and kind == 'file' and not dst.is_symlink() and dst.is_file()):
+            if not ((is_ref and source_wins and kind == 'file' and not dst.is_symlink() and dst.is_file()) or
+                    (repair and is_data and (dst.is_symlink() or dst.is_file()))):
                 raise SyncError(f'Destination conflict: {dst}')
         changes.append((rel, kind, value))
+    if progress:
+        progress("planned", len(changes), len(changes), None, 0, 0)
     if not dry_run:
-        for rel, kind, value in changes:
+        for index, (rel, kind, value) in enumerate(changes, 1):
             dst = safe_path(destination, rel)
             dst.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(prefix='.hf-cache-sync-', dir=dst.parent)
@@ -102,19 +122,58 @@ def sync(source, destination, models=None, source_wins=False, dry_run=False):
                     os.unlink(tmp)
                     os.symlink(value, tmp)
                 else:
-                    shutil.copy2(value, tmp)
+                    total = value.stat().st_size
+                    copied = 0
+                    if progress:
+                        progress("copying", index, len(changes), str(rel), copied, total)
+                    with value.open('rb', buffering=0) as src, open(tmp, 'wb', buffering=0) as out:
+                        cache_advice(src.fileno(), 0, 0, 'POSIX_FADV_SEQUENTIAL')
+                        fast_copy = getattr(os, 'copy_file_range', None)
+                        while copied < total:
+                            if fast_copy:
+                                try:
+                                    count = fast_copy(src.fileno(), out.fileno(), min(8 * 1024 * 1024, total - copied))
+                                except OSError as exc:
+                                    if exc.errno not in (errno.EXDEV, errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP):
+                                        raise
+                                    fast_copy = None
+                                    continue
+                                if not count:
+                                    fast_copy = None
+                                    continue
+                            else:
+                                chunk = src.read(min(1024 * 1024, total - copied))
+                                if not chunk:
+                                    raise OSError(f'Source changed during copy: {value}')
+                                count = out.write(chunk)
+                                if not count:
+                                    raise OSError(f'Unable to write: {tmp}')
+                                if count < len(chunk):
+                                    src.seek(count - len(chunk), os.SEEK_CUR)
+                            cache_advice(src.fileno(), copied, count, 'POSIX_FADV_DONTNEED')
+                            cache_advice(out.fileno(), copied, count, 'POSIX_FADV_DONTNEED')
+                            copied += count
+                            if progress:
+                                progress("copying", index, len(changes), str(rel), copied, total)
+                    shutil.copystat(value, tmp)
                 os.replace(tmp, dst)
+                if progress:
+                    progress("done", index, len(changes), str(rel), 0, 0)
             finally:
                 if os.path.lexists(tmp): os.unlink(tmp)
     return [str(item[0]) for item in changes]
 
 
-def prune(remote, models, dry_run=False):
+def prune(remote, models, dry_run=False, progress=None):
     remote = Path(remote).resolve()
     if not models:
         raise SyncError('Select at least one model to prune')
     names = select(remote, models)
+    if progress:
+        progress("planned", len(names), len(names), None, 0, 0)
     if not dry_run:
-        for name in names:
+        for index, name in enumerate(names, 1):
             shutil.rmtree(remote / name)
+            if progress:
+                progress("done", index, len(names), name, 0, 0)
     return names

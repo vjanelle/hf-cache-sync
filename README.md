@@ -1,33 +1,65 @@
 # hf-cache-sync
 
-Copy cached Hugging Face models between two **Hub cache directories**, including a CIFS-mounted cache. The tool runs locally; it does not download from or upload to the Hugging Face Hub.
+Sync cached Hugging Face models between a local Hub cache and a second cache, such as one on a mounted CIFS share. The utility works with files already in the caches; it does not download from or upload to the Hugging Face Hub.
 
-## Usage
+## Install
 
-Build a standalone executable with `make build` with `uv` installed (Python 3.10 or newer). The executable is `dist/hf-cache-sync`. You can also run `python3 -m hf_cache_sync` from the checkout.
+Run from a checkout with Python 3.10+ and [uv](https://docs.astral.sh/uv/):
 
 ```sh
-hf-cache-sync pull --local ~/.cache/huggingface/hub --remote /mnt/cache/hub --model org/model --dry-run
-hf-cache-sync pull --local ~/.cache/huggingface/hub --remote /mnt/cache/hub --model org/model
-hf-cache-sync push --local ~/.cache/huggingface/hub --remote /mnt/cache/hub --all
-hf-cache-sync prune --remote /mnt/cache/hub --model org/model --dry-run
-hf-cache-sync prune --remote /mnt/cache/hub --model org/model
+uv sync --locked
+uv run --locked python -m hf_cache_sync --help
 ```
 
-Repeat `--model` to select multiple models, or use `--all` for all source models on push/pull. Both cache directories must exist. Sync merges existing revisions without deleting destination models. Conflicting files stop the operation; `--source-wins` permits replacing conflicting refs only. A dry run checks and lists planned changes without writing.
+Alternatively, build a standalone executable with `make build`. See the [installation guide](docs/INSTALL.md) for Debian, AppImage, Windows MSI, and installation from source. CI produces package artifacts; it does not publish releases.
 
-Prune removes selected remote model directories regardless of local cache contents. It deliberately leaves shared blobs in place, including unused ones, to avoid deleting data used by other repositories. It does not reclaim the separate Xet transfer cache.
+## Quick start
 
-CIFS must support symbolic links and atomic renames. Mount options and server support vary; test with `--dry-run` and a small model first (dry-run cannot test symlink creation). Run while downloads, cache cleanup and other sync operations are stopped: the tool does not coordinate with Hugging Face cache locks. Transfers may be partially completed if interrupted; rerun to resume. Snapshot and blob conflicts are checked by reading file contents, which can take time for large models.
+Set the remote path to the **Hub cache directory** on the mounted share. The directory must already exist.
+
+```sh
+export HF_CACHE_SYNC_REMOTE=/mnt/models/huggingface/hub
+
+# Preview, then pull a model from the share into the local cache.
+uv run --locked python -m hf_cache_sync pull --model org/model --dry-run
+uv run --locked python -m hf_cache_sync pull --model org/model
+
+# Push all locally cached models to the share.
+uv run --locked python -m hf_cache_sync push --all
+```
+
+After installing the executable, replace `uv run --locked python -m hf_cache_sync` with `hf-cache-sync`. Repeat `--model` to select multiple models. `--all` selects all models in the source cache.
+
+The local cache defaults to `HF_HUB_CACHE`, the legacy `HUGGINGFACE_HUB_CACHE`, `HF_HOME/hub`, or `${XDG_CACHE_HOME:-~/.cache}/huggingface/hub`, in that order. Override it with `--local`. Use `--remote` to override `HF_CACHE_SYNC_REMOTE`. Both cache directories must exist.
+
+## Operations
+
+- **Pull / push:** merge cached snapshots and blobs. Existing model data files with the same size are reused; equal sizes do not prove their contents match. Different sizes cause a conflict. Refs and other metadata are compared by content. Use `--source-wins` to replace conflicting refs.
+- **Repair:** compare model data byte-for-byte and replace differing or missing destination data from a trusted source. Preview first:
+
+  ```sh
+  hf-cache-sync repair --from remote --model org/model --dry-run
+  hf-cache-sync repair --from local --model org/model
+  ```
+
+  Use `--all` to select every model in the source cache. Repair cannot determine which copy is correct. Conflicting refs require `--source-wins`.
+- **Prune:** remove selected model directories from the remote cache, independently of local cache contents. It retains shared blobs, even if unused, and does not prune the separate Xet transfer cache.
+
+  ```sh
+  hf-cache-sync prune --model org/model --dry-run
+  hf-cache-sync prune --model org/model
+  ```
+
+Progress and average per-file throughput are printed to stderr. Use `-v` / `--verbose` for paths and completed entries. `--dry-run` checks and lists planned changes without writing.
+
+## CIFS and cache safety
+
+The CIFS mount must support the source layout's symbolic links and atomic renames. Mount and server behavior vary: try a dry run and a small model first. A dry run cannot test whether symlinks can be created. Stop downloads, cache cleanup, and other sync operations during transfers; this utility does not coordinate with Hugging Face cache locks. An interrupted transfer may leave partial results; rerun to resume.
+
+Shared blob reference manifests are not rebuilt by sync. Avoid upstream shared-blob cleanup on synchronized caches until compatibility has been verified for your Hugging Face client version.
+
+Where supported, transfers use kernel-assisted copying with a buffered fallback. The utility provides sequential-access and page-eviction hints; the OS or CIFS filesystem may ignore them, especially for dirty destination pages. Eviction can affect other processes sharing those pages and does not control server-side caching. The utility does not use `O_DIRECT` or force synchronous writes.
 
 ## Development
 
-Install `uv`, then run `make test`, `make coverage` (minimum 80%), and `make build`. Tests use given/when/then scenario names and temporary cache fixtures.
-
-## Packages and installation
-
-`make install` builds and installs the executable to `/usr/local/bin` by default. Override `PREFIX`, `BINDIR`, or `DESTDIR` for a different installation location or staging root. `make deb` produces a Debian package using `dpkg-deb`. `make appimage` requires `appimagetool` on PATH (or set `APPIMAGETOOL` to its path). Set `VERSION` to override the default `0.1.0` package version. The executable and Linux packages target the architecture and glibc of the build system.
-
-On Windows, install Python, uv, and WiX Toolset 4, then run `./packaging/build-msi.ps1` in PowerShell. The MSI installs the executable and adds its directory to the system PATH; installation requires administrator privileges. Build on the target OS: PyInstaller does not cross-compile. CI builds Linux packages and the Windows MSI on their respective platforms; it does not publish releases.
-
-`uv run --locked` creates and manages the project `.venv` and installs the locked development tools automatically. Run `uv sync --locked` to prepare it explicitly.
+Use `make help` for available targets. `make test` runs the unittest suite, and `make coverage` enforces 80% line coverage. See [AGENTS.md](AGENTS.md) for contributor guidance.
